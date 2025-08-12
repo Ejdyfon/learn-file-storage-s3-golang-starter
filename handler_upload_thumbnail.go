@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,12 +30,9 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
-
-	const maxMemory = 10 << 20
+	const maxMemory = 10 << 20 // 10 MB
 	r.ParseMultipartForm(maxMemory)
 
-	// "thumbnail" should match the HTML form input name
 	file, header, err := r.FormFile("thumbnail")
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Unable to parse form file", err)
@@ -42,22 +40,37 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	defer file.Close()
 
-	imgData, err := io.ReadAll(file)
+	mediaType := header.Header.Get("Content-Type")
+	if mediaType == "" {
+		respondWithError(w, http.StatusBadRequest, "Missing Content-Type for thumbnail", nil)
+		return
+	}
+
+	data, err := io.ReadAll(file)
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Error while reading file", err)
+		respondWithError(w, http.StatusInternalServerError, "Error reading file", err)
 		return
 	}
 
-	vid, err := cfg.db.GetVideo(videoID)
-	if vid.UserID != userID {
-		respondWithError(w, http.StatusUnauthorized, "Thats not your video", err)
+	video, err := cfg.db.GetVideo(videoID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't find video", err)
 		return
 	}
-	thm := thumbnail{data: imgData, mediaType: header.Header.Get("Content-Type")}
-	videoThumbnails[videoID] = thm
-	url := fmt.Sprintf("http://localhost:%v/api/thumbnails/%v", cfg.port, videoID)
-	vid.ThumbnailURL = &url
+	if video.UserID != userID {
+		respondWithError(w, http.StatusUnauthorized, "Not authorized to update this video", nil)
+		return
+	}
 
-	cfg.db.UpdateVideo(vid)
-	respondWithJSON(w, http.StatusOK, vid)
+	base64Encoded := base64.StdEncoding.EncodeToString(data)
+	base64DataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, base64Encoded)
+
+	video.ThumbnailURL = &base64DataURL
+	err = cfg.db.UpdateVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't update video", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, video)
 }
